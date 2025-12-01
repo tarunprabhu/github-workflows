@@ -1,0 +1,459 @@
+# Builds Kitsune with only the CPU-centric tapir targets and the minimal set of
+# LLVM projects that are needed, then runs the tests.
+
+name: Test everywhere
+
+permissions:
+  actions: write
+  contents: read
+
+on:
+  # This workflow can be run manually. In this case, run it unconditionally.
+  workflow_dispatch:
+
+concurrency:
+  # Only allow one instance of this workflow on a given branch. This ensures
+  # that pushes to a branch will cancel any workflow that was triggered.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  name: FreeBSD (x86)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup variables
+        id: vars
+        run: |
+          build_dir="${{ github.workspace }}/build"
+          echo "build-dir=${build_dir}/build" >> "${GITHUB_OUTPUT}"
+          echo "ccache-dir=${build_dir}/ccache" >> "${GITHUB_OUTPUT}"
+          echo "ccache-key=ccache-freebsd-x86" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Kitsune
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+      - name: Configure, build and test
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: 14.3
+          sync: rsync
+          usesh: true
+          prepare: |
+            pkg install -y ccache cmake git libxml2 ninja
+            echo "runner:    ${{ runs-on }}"
+            echo "system:    $(uname -a)"
+            echo "cpu:       $(sysctl -n hw.model)"
+            echo "cores:     $(sysctl -n hw.ncpu)"
+            echo "memory:    $(sysctl -n hw.memsize) B"
+          run: |
+            CCACHE_DIR=${{ steps.vars.outputs.ccache-dir }}
+            build_dir=${{ steps.vars.outputs.build-dir }}
+            mkdir -p ${build_dir}
+            cmake -G Ninja \
+                  -B ${build_dir} \
+                  -S . \
+                  -DCMAKE_BUILD_TYPE=Release \
+                  -DUSE_CCACHE=ON
+            ninja -v -C ${build_dir}
+
+      - name: Print ccache stats
+        id: ccache-stats
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          ccache_key=${{ steps.vars.outputs.ccache-key }}
+          ccache_size=$(du -sh "${CCACHE_DIR}" | grep -oE "^[0-9]+[A-Z]")
+          echo "Cache key:                    ${ccache_key}"
+          echo "Cache size:                   ${ccache_size}"
+          ccache --show-stats --verbose
+
+      - name: Delete old ccache
+        id: ccache-delete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          key=${{ steps.vars.outputs.ccache-key }}
+          if gh cache list --repo ${repo} ${key} 2>&1 | grep -q ${key}; then
+              echo "Deleting cache ${key}"
+              gh cache delete --repo ${repo} ${key}
+          fi
+
+      - name: Save ccache
+        id: ccache-save
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+  linux-x86:
+    name: Linux (x86)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Setup variables
+        id: vars
+        run: |
+          build_dir="${{ github.workspace }}/build"
+          echo "build-dir=${build_dir}/build" >> "${GITHUB_OUTPUT}"
+          echo "ccache-dir=${build_dir}/ccache" >> "${GITHUB_OUTPUT}"
+          echo "ccache-key=ccache-linux-x86" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Kitsune
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+      - name: Setup system
+        id: setup-system
+        run: |
+          sudo apt-get install -y ccache
+          echo "runner:    ${{ runs-on }}"
+          echo "system:    $(uname -a)"
+          echo "cpu:       $(cat /proc/cpuinfo | grep "model name" | sed 's/model name\s*:\s*//g' | sort | uniq)"
+          echo "cores:     $(cat /proc/cpuinfo | grep -E "^processor" | wc -l)"
+          echo "memory:    $(cat /proc/meminfo | grep MemTotal | sed 's/MemTotal:\s*//g')"
+
+      - name: Configure
+        id: configure
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          tapir_targets='opencilk'
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          mkdir -p ${build_dir}
+          cmake -G Ninja \
+                -B ${build_dir} \
+                -S . \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DUSE_CCACHE=ON
+
+      - name: Build and test
+        id: test
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          ninja -v -C ${build_dir}
+
+      - name: Print ccache stats
+        id: ccache-stats
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          ccache_key=${{ steps.vars.outputs.ccache-key }}
+          ccache_size=$(du -sh "${CCACHE_DIR}" | grep -oE "^[0-9]+[A-Z]")
+          echo "Cache key:                    ${ccache_key}"
+          echo "Cache size:                   ${ccache_size}"
+          ccache --show-stats --verbose
+
+      - name: Delete old ccache
+        id: ccache-delete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          key=${{ steps.vars.outputs.ccache-key }}
+          if gh cache list --repo ${repo} ${key} 2>&1 | grep -q ${key}; then
+              echo "Deleting cache ${key}"
+              gh cache delete --repo ${repo} ${key}
+          fi
+
+      - name: Save ccache
+        id: ccache-save
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+  linux-arm:
+    name: Test on Linux (arm)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Setup variables
+        id: vars
+        run: |
+          build_dir="${{ github.workspace }}/build"
+          echo "build-dir=${build_dir}/build" >> "${GITHUB_OUTPUT}"
+          echo "ccache-dir=${build_dir}/ccache" >> "${GITHUB_OUTPUT}"
+          echo "ccache-key=ccache-linux-arm" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Kitsune
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+      - name: Setup system
+        id: setup-system
+        run: |
+          sudo apt-get install -y ccache
+          echo "runner:    ${{ runs-on }}"
+          echo "system:    $(uname -a)"
+          echo "cpu:       $(cat /proc/cpuinfo | grep "model name" | sed 's/model name\s*:\s*//g' | sort | uniq)"
+          echo "cores:     $(cat /proc/cpuinfo | grep -E "^processor" | wc -l)"
+          echo "memory:    $(cat /proc/meminfo | grep MemTotal | sed 's/MemTotal:\s*//g')"
+
+      - name: Configure
+        id: configure
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          tapir_targets='opencilk'
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          mkdir -p ${build_dir}
+          cmake -G Ninja \
+                -B ${build_dir} \
+                -S . \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DUSE_CCACHE=ON
+
+      - name: Build and test
+        id: test
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          ninja -v -C ${build_dir}
+
+      - name: Print ccache stats
+        id: ccache-stats
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          ccache_key=${{ steps.vars.outputs.ccache-key }}
+          ccache_size=$(du -sh "${CCACHE_DIR}" | grep -oE "^[0-9]+[A-Z]")
+          echo "Cache key:                    ${ccache_key}"
+          echo "Cache size:                   ${ccache_size}"
+          ccache --show-stats --verbose
+
+      - name: Delete old ccache
+        id: ccache-delete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          key=${{ steps.vars.outputs.ccache-key }}
+          if gh cache list --repo ${repo} ${key} 2>&1 | grep -q ${key}; then
+              echo "Deleting cache ${key}"
+              gh cache delete --repo ${repo} ${key}
+          fi
+
+      - name: Save ccache
+        id: ccache-save
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+  macosx-x86:
+    name: MacOSX (x86)
+    runs-on: macos-15-intel
+    steps:
+      - name: Setup variables
+        id: vars
+        run: |
+          build_root="${{ github.workspace }}/build"
+          echo "build-dir=${build_root}/build" >> "${GITHUB_OUTPUT}"
+          echo "ccache-dir=${build_root}/ccache" >> "${GITHUB_OUTPUT}"
+          echo "ccache-key=ccache-macosx-x86" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Kitsune
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+      - name: Setup system
+        id: setup-system
+        run: |
+          brew update
+          brew install ccache
+          echo "runner:    ${{ runs-on }}"
+          echo "system:    $(uname -a)"
+          echo "cpu:       $(sysctl -n machdep.cpu.brand_string)"
+          echo "cores:     $(sysctl -n hw.ncpu)"
+          echo "memory:    $(sysctl -n hw.memsize) B"
+
+      - name: Configure
+        id: configure
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        # Pass -DLLVM_DISABLE_ASSEMBLY_FILES=ON to work around test failure on
+        # some lld tests:
+        #
+        #     https://github.com/llvm/llvm-project/issues/81967
+        #
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          mkdir -p ${build_dir}
+          cmake -G Ninja \
+                -B ${build_dir} \
+                -S llvm. \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DUSE_CCACHE=ON
+
+      - name: Build and test
+        id: test
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          ninja -v -C ${build_dir}
+
+      - name: Print ccache stats
+        id: ccache-stats
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          ccache_key=${{ steps.vars.outputs.ccache-key }}
+          ccache_size=$(du -sh "${CCACHE_DIR}" | grep -oE "^[0-9]+[A-Z]")
+          echo "Cache key:                    ${ccache_key}"
+          echo "Cache size:                   ${ccache_size}"
+          ccache --show-stats --verbose
+
+      - name: Delete old ccache
+        id: ccache-delete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          key=${{ steps.vars.outputs.ccache-key }}
+          if gh cache list --repo ${repo} ${cache_key} | grep -q ${key}; then
+              echo "Deleting cache ${key}"
+              gh cache delete --repo ${repo} ${key}
+          fi
+
+      - name: Save ccache
+        id: ccache-save
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+  macosx-arm:
+    name: Test on MacOSX (arm)
+    runs-on: macos-15
+    steps:
+      - name: Set variables
+        id: vars
+        run: |
+          build_root="${{ github.workspace }}/build"
+          echo "build-dir=${build_root}/build" >> "${GITHUB_OUTPUT}"
+          echo "ccache-dir=${build_root}/ccache" >> "${GITHUB_OUTPUT}"
+          echo "ccache-key=ccache-macosx-arm" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Kitsune
+        id: checkout
+        uses: actions/checkout@v4
+
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
+
+      - name: Install dependencies
+        id: install-dependencies
+        run: |
+          brew update
+          brew install ccache
+
+      - name: Print system info
+        id: system-info
+        run: |
+          echo "runner:    ${{ runs-on }}"
+          echo "system:    $(uname -a)"
+          echo "cpu:       $(sysctl -n machdep.cpu.brand_string)"
+          echo "cores:     $(sysctl -n hw.ncpu)"
+          echo "memory:    $(sysctl -n hw.memsize) B"
+
+      - name: Configure
+        id: configure
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        # Pass -DLLVM_DISABLE_ASSEMBLY_FILES=ON to work around test failure on
+        # some lld tests:
+        #
+        #     https://github.com/llvm/llvm-project/issues/81967
+        #
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          mkdir -p ${build_dir}
+          cmake -G Ninja \
+                -B ${build_dir} \
+                -S . \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DUSE_CCACHE=ON
+
+      - name: Build and test
+        id: test
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          build_dir=${{ steps.vars.outputs.build-dir }}
+          ninja -v -C ${build_dir}
+
+      - name: Print ccache stats
+        id: ccache-stats
+        env:
+          CCACHE_DIR: ${{ steps.vars.outputs.ccache-dir }}
+        run: |
+          ccache_key=${{ steps.vars.outputs.ccache-key }}
+          ccache_size=$(du -sh "${CCACHE_DIR}" | grep -oE "^[0-9]+[A-Z]")
+          echo "Cache key:                    ${ccache_key}"
+          echo "Cache size:                   ${ccache_size}"
+          ccache --show-stats --verbose
+
+      - name: Delete old ccache
+        id: ccache-delete
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo=${{ github.repository }}
+          key=${{ steps.vars.outputs.ccache-key }}
+          if gh cache list --repo ${repo} ${key} | grep -q ${key}; then
+              echo "Deleting cache ${key}"
+              gh cache delete --repo ${repo} ${key}
+          fi
+
+      - name: Save ccache
+        id: ccache-save
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ${{ steps.vars.outputs.ccache-dir }}
+          key: ${{ steps.vars.outputs.ccache-key }}
